@@ -1,6 +1,7 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const config = require('./config');
+const db = require('./db');
 
 console.log('🤖 Iniciando Bot WhatsApp – Setores personalizados...');
 
@@ -60,16 +61,29 @@ async function processIncoming({ chatId, senderId, rawBody }) {
   if (senderId !== config.authorizedNumber) return; // somente número autorizado
 
   const clean = (rawBody || '').toLowerCase().trim();
-  const isMenu = clean === 'menu';
   const sector = getSectorByOption(clean);
+  const sectorKey = sector ? sector.key : null;
+
+  // Obter / criar conversa (por setor ou geral quando menu / inválido)
+  const conv = await db.getOrCreateConversation(senderId, sectorKey || 'geral');
+  await db.appendMessage(conv.id, 'inbound', rawBody, { chatId, sectorKey });
 
   const response = buildResponse(rawBody);
   await client.sendMessage(chatId, response);
   console.log(`✅ Resposta enviada para ${senderId} (opção: ${clean || 'n/a'})`);
+  await db.appendMessage(conv.id, 'outbound', response, { sectorKey });
 
   if (sector) {
     if (sector.urgent) console.log('🚨 Setor de urgência selecionado. Enviando notificação (se configurado)...');
-    await notifySector(sector, senderId);
+    // Notificar e gravar resultado
+    let notifyError = null; let success = false;
+    try {
+      await notifySector(sector, senderId);
+      success = true;
+    } catch (e) {
+      notifyError = e.message;
+    }
+    await db.recordNotification(conv.id, sector.key, sector.contactJid || null, success, notifyError);
   }
 }
 
@@ -109,5 +123,16 @@ process.on('unhandledRejection', r => console.error('❌ Rejeição não tratada
 process.on('uncaughtException', e => { console.error('❌ Exceção não capturada:', e); process.exit(1); });
 process.on('SIGINT', async () => { console.log('\n🛑 Encerrando...'); await client.destroy(); process.exit(0); });
 
+async function start(){
+  try {
+    await db.init();
+    console.log('💾 Banco de dados pronto.');
+    client.initialize();
+  } catch (e) {
+    console.error('❌ Erro ao inicializar banco:', e);
+    process.exit(1);
+  }
+}
+
 console.log('⏳ Inicializando...');
-client.initialize();
+start();
